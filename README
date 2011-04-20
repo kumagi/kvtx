@@ -1,0 +1,11 @@
+It is a transaction support library for memcached on ruby.
+
+USAGE:
+
+t = MemTransaction.new('localhost')
+
+t.transaction{|n|
+  n.set('k1','v1')
+  n.set('k1','v2')
+}
+only [set] and [get] supported
