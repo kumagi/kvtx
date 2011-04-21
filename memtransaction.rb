@@ -19,7 +19,8 @@ end
 
 $log=Logger.new(STDOUT)
 $log.level=Logger::DEBUG
-#$log.level=Logger::INFO
+$log.level=Logger::INFO
+$log.level=Logger::FATAL
 
 $log.datetime_format=''
 
@@ -30,7 +31,7 @@ class MemcacheWrap
     @lock = Mutex.new
   end
   def cas(key,&proc)
-    $log.debug('cas ' + key)
+    $log.debug('begin to cas on ' + key)
     begin
       $log.debug 'cas about: ' + key + ' begin'
       result = @client.cas(key,0,true,&proc)
@@ -47,7 +48,7 @@ class MemcacheWrap
     elsif result[0..5] == 'EXISTS'
       $log.debug('cas:' + key + ' failed')
     else
-      $log.fatal('cas:' + key + 'unexpected return : ' + p)
+      $log.fatal('cas:' + key + 'unexpected return : ' + p.to_s)
     end
     if result.nil? 
       p 'cas:not found in cas!!' + key.to_s
@@ -59,7 +60,7 @@ class MemcacheWrap
     begin
       result = @client.get(key,true)
       return nil if result.nil?
-      $log.debug('get withl ' + key + ' -> ' + (result=="" ? "empty" : result.to_s))
+      $log.debug('get withl ' + key + ' -> ' + (result=="" ? "<empty>" : result.to_s))
     ensure
       @lock.unlock
     end
@@ -106,7 +107,7 @@ class MemTransaction
       @name = name
     end
     def get(key)
-      retry_counter = 0
+      contention = ContentionManager.new(@client)
       $log.debug('transactional get begin')
       answer = nil
       loop{
@@ -117,8 +118,12 @@ class MemTransaction
             break if locator == ""
             old,new,owner = MessagePack.unpack(locator)
             begin
-              $log.info('get:' + key + ' -> ' + '['+ (old.nil? ? "" : ($devmemcached.get(old))) + '] [' + (new.nil? ? "" : ($devmemcached.get(new))) + ']')
+              old_data = @client.get(old) unless old.nil?
+              new_data = @client.get(new) unless new.nil?
+              $log.info('get:' + key + ' -> ['+ old_data.to_s + '] [' + new_data.to_s + ']')
             rescue => e
+              p e
+              p e.backtrace
             end
 
             $log.debug('getter owner:' + owner + ' =?= ' + @name)
@@ -135,38 +140,23 @@ class MemTransaction
               $log.debug('transactional get: owner already commited, rob it by ' + @name + ' from ' + owner)
               next_old = new
               data_to_delete = old
-              answer = @client.get(new)
             elsif owner_status == @@abort
               $log.debug('transactional get: owner already aborted, rob it by ' + @name+ ' from ' + owner)
               next_old = old
               data_to_delete = new
-              answer = @client.get(old)
             elsif owner_status == @@active
-              sleep 0.01 * rand(1 << retry_counter)
-              retry_counter += 1 if retry_counter <= 10
-              $log.debug('get:active waiting... ' + retry_counter.to_s)
-              if retry_counter > 10
-                $log.debug('get:rob from active thread !!make abort ' + retry_counter.to_s)
-                  @client.cas(owner){ |value|
-                  break unless value == @@active
-                  $log.info('get: rob ok' + @name)
-                    @@abort
-                  }
-                retry_counter = 0
-              end
               $log.debug 'get: retry! because ' + owner.to_s + 'is active!'
+              contention.resolve(owner)
               raise RetryException
             else
-              p 'why state is '+ status.to_s
+              p 'why state is ' + owner + ' => '+ owner_status.to_s
               exit
             end
-            if answer.nil?
-              $log.fatal 'Data to read is nil. why!?' + @name
-              raise AbortException
-            end
-            p "old:" + old + " new:" + new if answer.nil?
-            next_new = add_somewhere(answer)
-            $log.debug('try cas into [' + next_old + ',' + next_new +","+ @name + ']')
+
+            answer = @client.get(next_old)
+            raise AbortException if answer.nil?
+            next_new = add_somewhere(answer) # clone
+            $log.debug('get:try cas into [' + @client.get(next_old).to_s + ',' + @client.get(next_new) +","+ @name + ']')
             [next_old, next_new, @name].to_msgpack
           }
           if result == nil
@@ -192,75 +182,60 @@ class MemTransaction
     end
     def set(key,value)
       $log.debug('transactional set begin')
-      retry_counter = 0
+      contention = ContentionManager.new(@client)
+      next_new = add_somewhere(value)
       loop{
         check_status
-        data_to_delete = nil
         begin
+          data_to_delete = nil
           result = @client.cas(key){ |locator|
             $log.debug('locator:' + locator)
+            old,new,owner = MessagePack.unpack(locator)
             begin
-              old,new,owner = MessagePack.unpack(locator)
-            rescue MessagePack::UnpackError
-              $log.debug('set: unpack failed! retry.')
-              locator = @client.get(key)
-              retry
+              old_data = @client.get(old) unless old.nil?
+              new_data = @client.get(new) unless new.nil?
+              $log.info('set:' + key + ' -> ['+ old_data.to_s + '] [' + new_data.to_s + ']')
+            rescue => e
+              p e
+              p e.backtrace
             end
-            $log.info('set:' + key + ' -> ' + '['+ (old.nil? ? "" : ($devmemcached.get(old).to_s)) + '] [' + (new.nil? ? "" : ($devmemcached.get(new).to_s)) + ']')
+            
             $log.debug('owner:' + owner + ' =?= ' + @name)
             if owner == @name
               $log.debug('set:I already owned...')
-              next_new = add_somewhere(value)
-              [new, next_new, @name].to_msgpack
+              @client.set(new, value)
+              raise AlreadyOwn
             else
-              next_new = next_old = nil
+              next_old = nil
               owner_status = @client.get(owner)
               $log.debug("status:" + owner_status)
               if owner_status == @@commit
                 $log.debug 'set: owner seems to be commited, rob by ' + @name + 'from ' + owner
                 data_to_delete = old
                 next_old = new
-                next_new = add_somewhere(value)
-                $log.debug('set:try cas into [' + next_old + ',' + next_new +","+ @name + ']')
+                $log.debug('set:try cas into [' + next_old.to_s + ',' + next_new +","+ @name + ']')
               elsif owner_status == @@abort
                 $log.debug 'set: owner seems to be aborted, rob by ' + @name + 'from ' + owner
                 data_to_delete = new
                 next_old = old
-                next_new = add_somewhere(value)
-                $log.debug('set:try cas into [' + next_old + ',' + next_new +","+ @name + ']')
               elsif owner_status == @@active
-                $log.debug 'set: owner seems to be active, count!' + retry_counter
-                sleep 0.01 * rand(1 << retry_counter)
-                retry_counter += 1 if retry_counter <= 10
-                $log.debug('set:retry!! @ ' + retry_counter.to_s)
-                if retry_counter > 10
-                  rob_result = @client.cas(owner){ |value|
-                    break unless value == @@active
-                    $log.info('set: do robbing cas!' + key)
-                    @@abort
-                  }
-                  if rob_result.nil?
-                    $log.fatal "set:not exist " + owner
-                  elsif rob_result[0..5] == 'EXISTS'
-                    $log.debug 'set:rob failed, retry'
-                  elsif rob_result[0..5] == 'STORED'
-                    $log.debug 'set:rob success!!' + owner
-                  else
-                    $log.fatal 'set: why!?'
-                  end
-                  retry_counter = 0
-                  $log.debug('set:try rob and retry')
-                end
-                raise ActiveRetry
+                $log.debug 'set: retry! because ' + owner.to_s + 'is active!'
+                contention.resolve(owner)
+                raise RetryException
               end
+              $log.debug('set:try cas into [' + @client.get(next_old).to_s + ',' + value.to_s + ","+ @name + ']')
               [new, next_new, @name].to_msgpack
             end
           }
-        rescue ActiveRetry => e
+        rescue RetryException => e
           $log.debug("retry transaction !")
           next
-        rescue RetryException
-          next
+        rescue AlreadyOwn
+          $log.debug 'set:overwrite ' + key + ' => ' + value.to_s
+          break
+        rescue AbortException => e
+          @client.delete(next_new)
+          raise e
         rescue => e
           $log.fatal('set:unexpected error ' + e.to_s)
           raise e
@@ -268,7 +243,7 @@ class MemTransaction
         if result.nil?
           $log.debug('new saving:' + key + '->' + value)
           @client.set(key, [nil,add_somewhere(value),@name].to_msgpack)
-          return nil
+          break
         elsif result[0..5] == 'EXISTS'
           $log.debug('set:cas retry')
           next
@@ -298,20 +273,53 @@ class MemTransaction
       return valuename
     end
     private :add_somewhere
+    class ContentionManager
+      @@commit = 'commit'
+      @@abort = 'abort'
+      @@active = 'active'
+      def initialize(client)
+        @counter = 0
+        @client = client
+      end
+      def resolve(other_owner)
+        sleep 0.001 * rand(1 << @counter)
+        if @counter <= 10
+          @counter += 1
+        else
+          $log.debug('contention: @' + @counter.to_s)
+          rob_result = @client.cas(other_owner){ |value|
+            break unless value == @@active
+            $log.info('contention: do robbing cas!' + other_owner.to_s)
+            @@abort
+          }
+          if rob_result.nil?
+            $log.debug "contention:already resolved:" + other_owner
+          elsif rob_result[0..5] == 'EXISTS'
+            $log.debug 'contention:rob failed, retry'
+          elsif rob_result[0..5] == 'STORED'
+            $log.debug 'contention:rob success!!' + other_owner
+          else
+            $log.fatal 'contention: invelid cas result!'
+          end
+          @counter = 0
+          $log.debug('contention:try rob and retry')
+        end
+      end
+    end
   end
   def initialize(host)
     srand
     @client = MemcacheWrap.new host
-    @t_name = 'transact1on' + (rand(1000000).to_s)
   end
   $abortcounter = 0
   $successcounter = 0
   def transaction
+    @t_name = 'transact1on' + (rand(100000000).to_s)
     begin
       loop {
         transact_result = 10
-        @client.set(@t_name, @@active)
         begin
+          @client.set(@t_name, @@active)
           transact_result = @client.cas(@t_name){ |value|
             raise AbortException unless value == @@active
             yield Accessor.new(@client, @t_name)
@@ -320,9 +328,9 @@ class MemTransaction
           if transact_result.nil?
             p 'transaction:result nil!! ' + @t_name
           end
-        rescue AbortException
+        rescue AbortException => e
           $abortcounter += 1
-          $log.debug 'aborted! ' + @t_name
+          $log.debug 'aborted! ' + @t_name + ' in ' + e.backtrace[0].to_s
           retry
         end
         
@@ -337,14 +345,16 @@ class MemTransaction
           $successcounter += 1
           $log.debug "abort counter:" + $abortcounter.to_s
           $log.debug "success counter:" + $successcounter.to_s
+          $log.info "transaction:success !"
           break
         end
         $abortcounter += 1
-        $log.debug('transactional retry!')
+        $log.info('transaction:retry !')
       }
     rescue => e
       p e.backtrace[0]
       $log.fatal('unexpected error in transaction' + e.to_s)
+      raise e
     end
     $log.debug('transaction commit!!' + @t_name)
   end

@@ -18,6 +18,7 @@ end
 
 describe MemTransaction do
   before do
+    pending
     @memcached = MemcacheWrap.new('localhost:11211')
     @memcached.flush_all
     @tr = MemTransaction.new('localhost:11211')
@@ -50,6 +51,7 @@ describe MemTransaction do
     #get_old('a').should == 'b'
   end
   it "success many transaction" do
+    #pending "noisy"
     100.times {|n|
       @tr.transaction{|o|
         key = 'a' + n.to_s
@@ -80,6 +82,8 @@ describe MemTransaction do
         trynum += 1
       end
     }
+        p 'new of a:' + get_new('a')
+        p 'new of b:' + get_new('b')
     get_new('b').should == 'd'
     get_new('a').should == 'c'
     retrynum.should == retrying+1
@@ -114,23 +118,25 @@ end
 describe MemTransaction do
   before do
     initialize = MemTransaction.new('localhost:11211')
+    @memcached = MemcacheWrap.new('localhost:11211')    
+    @memcached.flush_all
     initialize.transaction{ |m|
-      m.set('cnt', '0')
+      m.set('counter', '0')
     }
   end
   it 'transaction saves consistency' do
-    #pending ,
+    #pending 
     threads = []
     count = 0
     100.times { |n|
       threads << Thread.new do
         begin
           procedure = MemTransaction.new('localhost:11211') 
-          10.times{
+          1000.times{
             procedure.transaction{ |m|
-              t = m.get('cnt').to_i
+              t = m.get('counter').to_i
               newvalue = (t+1).to_s
-              m.set('cnt', newvalue)
+              m.set('counter', newvalue)
               p t.to_s + ' -> ' + (t.to_i+1).to_s
             }
             count +=1
@@ -145,6 +151,6 @@ describe MemTransaction do
       n.join
     }
     p 'count :' + count.to_s
-    get_new('cnt').should == '1000'
+    get_new('counter').should == '100000'
   end
 end
