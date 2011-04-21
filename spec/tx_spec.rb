@@ -136,7 +136,7 @@ describe MemTransaction do
             count +=1
           }
         rescue => e
-          p 'thread exception!'
+          p 'FATAL!!thread exception!'
           p e
         end
       end

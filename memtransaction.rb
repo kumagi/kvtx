@@ -2,7 +2,6 @@ require 'memcache'
 require 'msgpack'
 require 'logger'
 require 'ruby-debug'
-require 'ap'
 srand
 
 class AbortException < Exception
@@ -37,7 +36,6 @@ class MemcacheWrap
       result = @client.cas(key,0,true,&proc)
       $log.debug 'cas about: ' + key + ' end with :' + result.to_s
     rescue =>e
-      ap e
       p e
       $log.fatal 'cas:client exception!!!' + e.to_s
       raise e
@@ -114,11 +112,12 @@ class MemTransaction
       loop{
         check_status
         begin
+          data_to_delete = nil
           result = @client.cas(key){ |locator|
             break if locator == ""
             old,new,owner = MessagePack.unpack(locator)
             begin
-              $log.debug(key + ' -> ' + '['+ (old.nil? ? "" : ($devmemcached.get(old))) + '] [' + (new.nil? ? "" : ($devmemcached.get(new))) + ']')
+              $log.info('get:' + key + ' -> ' + '['+ (old.nil? ? "" : ($devmemcached.get(old))) + '] [' + (new.nil? ? "" : ($devmemcached.get(new))) + ']')
             rescue => e
             end
 
@@ -130,30 +129,30 @@ class MemTransaction
               raise AlreadyOwn
             end
             owner_status = @client.get(owner)
-            $log.debug('begin to rob the owning')
+            $log.debug('get:begin to rob the owning. Im ' + @name)
             next_old = nil
             if owner_status == @@commit
               $log.debug('transactional get: owner already commited, rob it by ' + @name + ' from ' + owner)
               next_old = new
-              @client.delete(old) unless old.nil?
+              data_to_delete = old
               answer = @client.get(new)
             elsif owner_status == @@abort
               $log.debug('transactional get: owner already aborted, rob it by ' + @name+ ' from ' + owner)
               next_old = old
-              @client.delete(new) unless new.nil?
+              data_to_delete = new
               answer = @client.get(old)
             elsif owner_status == @@active
-              sleep 0.01 * (1 << retry_counter)
-              retry_counter += 1 if retry_counter <= 5
+              sleep 0.01 * rand(1 << retry_counter)
+              retry_counter += 1 if retry_counter <= 10
               $log.debug('get:active waiting... ' + retry_counter.to_s)
-              if retry_counter > 5
+              if retry_counter > 10
                 $log.debug('get:rob from active thread !!make abort ' + retry_counter.to_s)
                   @client.cas(owner){ |value|
                   break unless value == @@active
                   $log.info('get: rob ok' + @name)
                     @@abort
                   }
-                retry_counter == 0
+                retry_counter = 0
               end
               $log.debug 'get: retry! because ' + owner.to_s + 'is active!'
               raise RetryException
@@ -161,7 +160,10 @@ class MemTransaction
               p 'why state is '+ status.to_s
               exit
             end
-            raise AbortException if answer.nil?
+            if answer.nil?
+              $log.fatal 'Data to read is nil. why!?' + @name
+              raise AbortException
+            end
             p "old:" + old + " new:" + new if answer.nil?
             next_new = add_somewhere(answer)
             $log.debug('try cas into [' + next_old + ',' + next_new +","+ @name + ']')
@@ -174,6 +176,7 @@ class MemTransaction
             $log.debug('get:cas retry')
             next
           end
+          @client.delete(data_to_delete) unless data_to_delete.nil?
         rescue AlreadyOwn
           break
         rescue RetryException
@@ -192,6 +195,7 @@ class MemTransaction
       retry_counter = 0
       loop{
         check_status
+        data_to_delete = nil
         begin
           result = @client.cas(key){ |locator|
             $log.debug('locator:' + locator)
@@ -202,36 +206,54 @@ class MemTransaction
               locator = @client.get(key)
               retry
             end
-            $log.debug(key + ' -> ' + '['+ (old.nil? ? "" : ($devmemcached.get(old).to_s)) + '] [' + (new.nil? ? "" : ($devmemcached.get(new).to_s)) + ']')
+            $log.info('set:' + key + ' -> ' + '['+ (old.nil? ? "" : ($devmemcached.get(old).to_s)) + '] [' + (new.nil? ? "" : ($devmemcached.get(new).to_s)) + ']')
             $log.debug('owner:' + owner + ' =?= ' + @name)
             if owner == @name
               $log.debug('set:I already owned...')
               next_new = add_somewhere(value)
               [new, next_new, @name].to_msgpack
             else
+              next_new = next_old = nil
               owner_status = @client.get(owner)
               $log.debug("status:" + owner_status)
               if owner_status == @@commit
-                @client.delete(old) unless old.nil?
-                [new, add_somewhere(value), @name].to_msgpack
+                $log.debug 'set: owner seems to be commited, rob by ' + @name + 'from ' + owner
+                data_to_delete = old
+                next_old = new
+                next_new = add_somewhere(value)
+                $log.debug('set:try cas into [' + next_old + ',' + next_new +","+ @name + ']')
               elsif owner_status == @@abort
-                @client.delete(new)
-                [old, add_somewhere(value), @name].to_msgpack
+                $log.debug 'set: owner seems to be aborted, rob by ' + @name + 'from ' + owner
+                data_to_delete = new
+                next_old = old
+                next_new = add_somewhere(value)
+                $log.debug('set:try cas into [' + next_old + ',' + next_new +","+ @name + ']')
               elsif owner_status == @@active
-                sleep 0.01 * (1 << retry_counter)
-                retry_counter += 1 if retry_counter <= 5
+                $log.debug 'set: owner seems to be active, count!' + retry_counter
+                sleep 0.01 * rand(1 << retry_counter)
+                retry_counter += 1 if retry_counter <= 10
                 $log.debug('set:retry!! @ ' + retry_counter.to_s)
-                if retry_counter > 5
-                  @client.cas(owner){ |value|
+                if retry_counter > 10
+                  rob_result = @client.cas(owner){ |value|
                     break unless value == @@active
-                    $log.info('set: retry ok' + key)
+                    $log.info('set: do robbing cas!' + key)
                     @@abort
                   }
+                  if rob_result.nil?
+                    $log.fatal "set:not exist " + owner
+                  elsif rob_result[0..5] == 'EXISTS'
+                    $log.debug 'set:rob failed, retry'
+                  elsif rob_result[0..5] == 'STORED'
+                    $log.debug 'set:rob success!!' + owner
+                  else
+                    $log.fatal 'set: why!?'
+                  end
                   retry_counter = 0
-                  $log.debug('aborting')
+                  $log.debug('set:try rob and retry')
                 end
                 raise ActiveRetry
               end
+              [new, next_new, @name].to_msgpack
             end
           }
         rescue ActiveRetry => e
@@ -251,7 +273,8 @@ class MemTransaction
           $log.debug('set:cas retry')
           next
         elsif result[0..5] == 'STORED'
-          $log.debug('set:cas ok!!')
+          @client.delete(data_to_delete) unless data_to_delete.nil?
+          $log.debug('set:cas ok for ' + key)
           break
         else
           $log.fatal('invalid message!')
@@ -299,7 +322,7 @@ class MemTransaction
           end
         rescue AbortException
           $abortcounter += 1
-          @log.debug 'aborted! ' + @t_name
+          $log.debug 'aborted! ' + @t_name
           retry
         end
         
@@ -323,6 +346,7 @@ class MemTransaction
       p e.backtrace[0]
       $log.fatal('unexpected error in transaction' + e.to_s)
     end
+    $log.debug('transaction commit!!' + @t_name)
   end
 end
 
