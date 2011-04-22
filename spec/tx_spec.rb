@@ -18,7 +18,7 @@ end
 
 describe MemTransaction do
   before do
-    pending
+    #pending
     @memcached = MemcacheWrap.new('localhost:11211')
     @memcached.flush_all
     @tr = MemTransaction.new('localhost:11211')
@@ -132,12 +132,11 @@ describe MemTransaction do
       threads << Thread.new do
         begin
           procedure = MemTransaction.new('localhost:11211') 
-          1000.times{
+          10.times{
             procedure.transaction{ |m|
               t = m.get('counter').to_i
               newvalue = (t+1).to_s
               m.set('counter', newvalue)
-              p t.to_s + ' -> ' + (t.to_i+1).to_s
             }
             count +=1
           }
@@ -151,6 +150,6 @@ describe MemTransaction do
       n.join
     }
     p 'count :' + count.to_s
-    get_new('counter').should == '100000'
+    get_new('counter').should == '1000'
   end
 end

@@ -19,11 +19,20 @@ end
 
 $log=Logger.new(STDOUT)
 $log.level=Logger::DEBUG
-$log.level=Logger::INFO
-$log.level=Logger::FATAL
+#$log.level=Logger::INFO
+#$log.level=Logger::FATAL
 
 $log.datetime_format=''
 
+
+
+def random_string(len)
+  random_pattern = ('a'..'z').to_a + ('A'..'Z').to_a + ('0'..'9').to_a # + '!@#$%^&*()_+{}:;-=][/.,<>?"'
+  ans = (Array.new(len){
+           random_pattern[rand(random_pattern.size)]
+         }
+         ).join
+end
 
 class MemcacheWrap
   def initialize(hostname)
@@ -189,7 +198,6 @@ class MemTransaction
         begin
           data_to_delete = nil
           result = @client.cas(key){ |locator|
-            $log.debug('locator:' + locator)
             old,new,owner = MessagePack.unpack(locator)
             begin
               old_data = @client.get(old) unless old.nil?
@@ -202,8 +210,8 @@ class MemTransaction
             
             $log.debug('owner:' + owner + ' =?= ' + @name)
             if owner == @name
-              $log.debug('set:I already owned...')
               @client.set(new, value)
+              $log.info('set: owned! ' + key + ' -> ['+ old_data.to_s + '] [' + value.to_s + ']')
               raise AlreadyOwn
             else
               next_old = nil
@@ -222,8 +230,10 @@ class MemTransaction
                 $log.debug 'set: retry! because ' + owner.to_s + 'is active!'
                 contention.resolve(owner)
                 raise RetryException
+              else
+                $log.fatal 'set:unknown status ' + owner_status
               end
-              $log.debug('set:try cas into [' + @client.get(next_old).to_s + ',' + value.to_s + ","+ @name + ']')
+              $log.debug('set:try cas into [' + (next_old.nil? ? "" : @client.get(next_old).to_s) + ',' + value.to_s + ","+ @name + ']')
               [new, next_new, @name].to_msgpack
             end
           }
@@ -266,7 +276,7 @@ class MemTransaction
     end
     private :check_status
     def add_somewhere(value)
-      valuename = @name + ':' + rand(9999999999).to_s
+      valuename = @name + ':' + random_string(12)
       #      p valuename + ' -> ' + value
       $log.debug 'tmp name is ' + valuename.to_s + '=>' + value.to_s
       @client.set(valuename, value)
@@ -314,7 +324,7 @@ class MemTransaction
   $abortcounter = 0
   $successcounter = 0
   def transaction
-    @t_name = 'transact1on' + (rand(100000000).to_s)
+    @t_name = 'tran:' + random_string(32)
     begin
       loop {
         transact_result = 10
@@ -352,12 +362,13 @@ class MemTransaction
         $log.info('transaction:retry !')
       }
     rescue => e
-      p e.backtrace[0]
-      $log.fatal('unexpected error in transaction' + e.to_s)
+      p e.backtrace
+      $log.fatal('unexpected error in transaction ' + e.to_s)
       raise e
     end
     $log.debug('transaction commit!!' + @t_name)
   end
+  
 end
 
 
