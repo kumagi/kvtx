@@ -126,14 +126,6 @@ class MemTransaction
           result = @client.cas(key){ |locator|
             break if locator == ""
             old,new,owner = MessagePack.unpack(locator)
-            begin
-              old_data = @client.get(old) unless old.nil?
-              new_data = @client.get(new) unless new.nil?
-              $log.info('get:' + key + ' -> ['+ old_data.to_s + '] [' + new_data.to_s + ']')
-            rescue => e
-              p e
-              p e.backtrace
-            end
 
             $log.debug('getter owner:' + owner + ' =?= ' + @name)
             if owner == @name
@@ -165,7 +157,7 @@ class MemTransaction
             answer = @client.get(next_old)
             raise AbortException if answer.nil?
             next_new = add_somewhere(answer) # clone
-            $log.debug('get:try cas into [' + @client.get(next_old).to_s + ',' + @client.get(next_new) +","+ @name + ']')
+            $log.debug('get:try cas into [' + answer.to_s + ',' + answer.to_s +","+ @name + ']')
             [next_old, next_new, @name].to_msgpack
           }
           if result == nil
@@ -174,8 +166,10 @@ class MemTransaction
           elsif result[0..5] == 'EXISTS'
             $log.debug('get:cas retry')
             next
+          elsif result[0..5] == 'STORED'
+            # success!
+            @client.delete(data_to_delete) unless data_to_delete.nil?
           end
-          @client.delete(data_to_delete) unless data_to_delete.nil?
         rescue AlreadyOwn
           break
         rescue RetryException
@@ -199,14 +193,6 @@ class MemTransaction
           data_to_delete = nil
           result = @client.cas(key){ |locator|
             old,new,owner = MessagePack.unpack(locator)
-            begin
-              old_data = @client.get(old) unless old.nil?
-              new_data = @client.get(new) unless new.nil?
-              $log.info('set:' + key + ' -> ['+ old_data.to_s + '] [' + new_data.to_s + ']')
-            rescue => e
-              p e
-              p e.backtrace
-            end
             
             $log.debug('owner:' + owner + ' =?= ' + @name)
             if owner == @name
@@ -233,7 +219,6 @@ class MemTransaction
               else
                 $log.fatal 'set:unknown status ' + owner_status
               end
-              $log.debug('set:try cas into [' + (next_old.nil? ? "" : @client.get(next_old).to_s) + ',' + value.to_s + ","+ @name + ']')
               [new, next_new, @name].to_msgpack
             end
           }
@@ -335,22 +320,12 @@ class MemTransaction
             yield Accessor.new(@client, @t_name)
             @@commit
           }
-          if transact_result.nil?
-            p 'transaction:result nil!! ' + @t_name
-          end
         rescue AbortException => e
           $abortcounter += 1
           $log.debug 'aborted! ' + @t_name + ' in ' + e.backtrace[0].to_s
           retry
         end
         
-        if transact_result.nil?
-          res = @client.get(@t_name)
-          p 'not found for ' + @t_name + ':' + res.to_s
-          res = @client.cas(@t_name){ 'active'}
-          p 'not found and retry : ' + res.to_s
-          exit
-        end
         if transact_result[0..5] == 'STORED'
           $successcounter += 1
           $log.debug "abort counter:" + $abortcounter.to_s
@@ -366,7 +341,7 @@ class MemTransaction
       $log.fatal('unexpected error in transaction ' + e.to_s)
       raise e
     end
-    $log.debug('transaction commit!!' + @t_name)
+    $log.debug('transaction commit!! ' + @t_name)
   end
   
 end
