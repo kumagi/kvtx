@@ -19,12 +19,10 @@ end
 
 $log=Logger.new(STDOUT)
 $log.level=Logger::DEBUG
-#$log.level=Logger::INFO
-#$log.level=Logger::FATAL
+# $log.level=Logger::INFO
+$log.level=Logger::FATAL
 
 $log.datetime_format=''
-
-
 
 def random_string(len)
   random_pattern = ('a'..'z').to_a + ('A'..'Z').to_a + ('0'..'9').to_a # + '!@#$%^&*()_+{}:;-=][/.,<>?"'
