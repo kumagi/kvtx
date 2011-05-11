@@ -77,13 +77,14 @@ describe MemTransaction do
       n.set('b','d')
       if trynum < retrying
         MemTransaction.new('localhost:11211').transaction{ |m|
+          #p "over writing b"
           m.set('b','e')
         }
         trynum += 1
       end
     }
-        p 'new of a:' + get_new('a')
-        p 'new of b:' + get_new('b')
+    #p 'new of a:' + get_new('a')
+    #p 'new of b:' + get_new('b')
     get_new('b').should == 'd'
     get_new('a').should == 'c'
     retrynum.should == retrying+1
