@@ -39,6 +39,15 @@ class MemcacheWrap
     throw 'setting value is nil!!' if value.nil?
     @client.set(key,value,0)
   end
+  def add(key,value)
+    throw 'setting value is nil!!' if value.nil?
+    begin
+      @client.add(key,value,0)
+    rescue Memcached::NotStored
+      return false
+    end
+    return true
+  end
   def delete(key)
     $log.debug('delete ' + key.to_s)
     begin

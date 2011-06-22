@@ -41,14 +41,28 @@ end
 
 $devmemcached  = MemcacheWrap.new('localhost:11211')
 
+
+module RandomAdd
+  def random_add(value)
+    loop{
+      key = random_string(31)
+      result = @client.add(key, value)
+      return key if result == true
+    }
+    end
+end
+
 class MemTransaction
   include MemTransactionConst
+  include RandomAdd
   class Accessor
     include MemTransactionConst
+    include RandomAdd
     def initialize(client, name)
       @client = client
       @name = name
     end
+    private :random_add
     def get(key)
       contention = ContentionManager.new(@client)
       $log.debug('transactional get begin')
@@ -88,7 +102,7 @@ class MemTransaction
             end
             answer = @client.get(next_old)
             raise AbortException if answer.nil?
-            next_new = add_somewhere(answer) # clone
+            next_new = random_add(answer) # clone
             $log.debug('get:try cas into [' + answer.to_s + ',' + answer.to_s + "," + @name + ']')
             [next_old, next_new, @name].to_msgpack
           }
@@ -119,7 +133,7 @@ class MemTransaction
     def set(key,value)
       $log.debug('transactional set begin')
       contention = ContentionManager.new(@client)
-      next_new = add_somewhere(value)
+      next_new = random_add(value)
       loop{
         #check_status
         begin
@@ -185,14 +199,6 @@ class MemTransaction
       raise NotInTransaction.new if status == COMMIT
     end
     private :check_status
-    def add_somewhere(value)
-      valuename = @name + ':' + random_string(12)
-      #      p valuename + ' -> ' + value
-      $log.debug 'tmp name is ' + valuename.to_s + '=>' + value.to_s
-      @client.set(valuename, value)
-      return valuename
-    end
-    private :add_somewhere
     class ContentionManager
       include MemTransactionConst
       def initialize(client)
@@ -229,13 +235,13 @@ class MemTransaction
   end
   $abortcounter = 0
   $successcounter = 0
+  
   def transaction
-    @t_name = @transaction_name + random_string(32)
     begin
       loop {
         transact_result = 10
         begin
-          @client.set(@t_name, ACTIVE)
+          @t_name = random_add(ACTIVE)
           @client.cas(@t_name){ |value|
             raise AbortException unless value == ACTIVE
             yield Accessor.new(@client, @t_name)

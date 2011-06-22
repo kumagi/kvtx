@@ -38,6 +38,11 @@ class MemcacheWrap
     throw 'setting value is nil!!' if value.nil?
     @client.set(key,value,0,true)
   end
+  def add(key,value)
+    @counter['set'] += 1
+    throw 'setting value is nil!!' if value.nil?
+    @client.set(key,value,0,true)
+  end
   def delete(key)
     @client.delete(key)
   end
